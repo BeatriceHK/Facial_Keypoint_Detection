@@ -1,26 +1,28 @@
 library(reshape2)
-library(doSNOW)
+library(doMC)
+registerDoMC()
 
+# read data into R
+setwd("~/kaggle")
+train = read.csv("train.csv", header = T, stringsAsFactors = F)
+test = read.csv("test.csv", header = T, stringsAsFactors = F)
 
 # parameters
-patch_size  <- 10
+patch_size <- 10
 search_size <- 2
 
-
 # read data and convert image strings to arrays
-im.train <- foreach(im = sm.train$Image, .combine=rbind) %dopar% {
+im.train <- foreach(im = train$Image, .combine=rbind) %dopar% {
   as.integer(unlist(strsplit(im, " ")))
 }
-im.test    <- foreach(im = d.test$Image, .combine=rbind) %dopar% {
+im.test <- foreach(im = test$Image, .combine=rbind) %dopar% {
   as.integer(unlist(strsplit(im, " ")))
 }
-d.train$Image <- NULL
-d.test$Image  <- NULL
-
+train$Image <- NULL
+test$Image <- NULL
 
 # list the coordinates we have to predict
-coordinate.names <- gsub("_x", "", names(d.train)[grep("_x", names(d.train))])
-
+coordinate.names <- gsub("_x", "", names(train)[grep("_x", names(train))])
 
 # for each one, compute the average patch
 mean.patches <- foreach(coord = coordinate.names) %dopar% {
@@ -29,10 +31,10 @@ mean.patches <- foreach(coord = coordinate.names) %dopar% {
   coord_y <- paste(coord, "y", sep="_")
   
   # compute average patch
-  patches <- foreach (i = 1:nrow(d.train), .combine=rbind) %do% {
+  patches <- foreach (i = 1:nrow(train), .combine=rbind) %do% {
     im  <- matrix(data = im.train[i,], nrow=96, ncol=96)
-    x   <- d.train[i, coord_x]
-    y   <- d.train[i, coord_y]
+    x   <- train[i, coord_x]
+    y   <- train[i, coord_y]
     x1  <- (x-patch_size)
     x2  <- (x+patch_size)
     y1  <- (y-patch_size)
@@ -53,13 +55,13 @@ mean.patches <- foreach(coord = coordinate.names) %dopar% {
 # find the position that best correlates with the average patch
 p <- foreach(coord_i = 1:length(coordinate.names), .combine=cbind) %dopar% {
   # the coordinates we want to predict
-  coord   <- coordinate.names[coord_i]
+  coord <- coordinate.names[coord_i]
   coord_x <- paste(coord, "x", sep="_")
   coord_y <- paste(coord, "y", sep="_")
   
   # the average of them in the training set (our starting point)
-  mean_x  <- mean(d.train[, coord_x], na.rm=T)
-  mean_y  <- mean(d.train[, coord_y], na.rm=T)
+  mean_x  <- mean(train[, coord_x], na.rm=T)
+  mean_y  <- mean(train[, coord_y], na.rm=T)
   
   # search space: 'search_size' pixels centered on the average coordinates 
   x1 <- as.integer(mean_x)-search_size
@@ -68,8 +70,8 @@ p <- foreach(coord_i = 1:length(coordinate.names), .combine=cbind) %dopar% {
   y2 <- as.integer(mean_y)+search_size
   
   # ensure we only consider patches completely inside the image
-  x1 <- ifelse(x1-patch_size<1,  patch_size+1,  x1)
-  y1 <- ifelse(y1-patch_size<1,  patch_size+1,  y1)
+  x1 <- ifelse(x1-patch_size<1, patch_size+1, x1)
+  y1 <- ifelse(y1-patch_size<1, patch_size+1, y1)
   x2 <- ifelse(x2+patch_size>96, 96-patch_size, x2)
   y2 <- ifelse(y2+patch_size>96, 96-patch_size, y2)
   
@@ -77,15 +79,15 @@ p <- foreach(coord_i = 1:length(coordinate.names), .combine=cbind) %dopar% {
   params <- expand.grid(x = x1:x2, y = y1:y2)
   
   # for each image...
-  r <- foreach(i = 1:nrow(d.test), .combine=rbind) %do% {
-    if ((coord_i==1)&&((i %% 100)==0)) { cat(sprintf("%d/%d\n", i, nrow(d.test))) }
+  r <- foreach(i = 1:nrow(test), .combine=rbind) %do% {
+    if ((coord_i==1)&&((i %% 100)==0)) {cat(sprintf("%d/%d\n", i, nrow(test)))}
     im <- matrix(data = im.test[i,], nrow=96, ncol=96)
     
     # ... compute a score for each position ...
-    r  <- foreach(j = 1:nrow(params), .combine=rbind) %do% {
-      x     <- params$x[j]
-      y     <- params$y[j]
-      p     <- im[(x-patch_size):(x+patch_size), (y-patch_size):(y+patch_size)]
+    r <- foreach(j = 1:nrow(params), .combine=rbind) %do% {
+      x <- params$x[j]
+      y <- params$y[j]
+      p <- im[(x-patch_size):(x+patch_size), (y-patch_size):(y+patch_size)]
       score <- cor(as.vector(p), as.vector(mean.patches[[coord_i]]))
       score <- ifelse(is.na(score), 0, score)
       data.frame(x, y, score)
@@ -99,13 +101,12 @@ p <- foreach(coord_i = 1:length(coordinate.names), .combine=cbind) %dopar% {
 }
 
 # prepare file for submission
-predictions        <- data.frame(ImageId = 1:nrow(d.test), p)
-submission         <- melt(predictions, id.vars="ImageId", variable.name="FeatureName", value.name="Location")
-example.submission <- read.csv(paste0(data.dir, 'submissionFileFormat.csv'))
-sub.col.names      <- names(example.submission)
+predictions <- data.frame(ImageId = 1:nrow(test), p)
+submission <- melt(predictions, id.vars="ImageId", variable.name="FeatureName", value.name="Location")
+example.submission <- read.csv('SubmissionFileFormat.csv')
+sub.col.names <- names(example.submission)
 example.submission$Location <- NULL
 
 submission <- merge(example.submission, submission, all.x=T, sort=F)
 submission <- submission[, sub.col.names]
-
 write.csv(submission, file="submission_search.csv", quote=F, row.names=F)
